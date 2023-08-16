@@ -1,0 +1,146 @@
+串口DMA发送与接收配置f
+发送：需要发送的时候使能dma传输，在DMA传输完成中断里失能dma传输，可以实现需要的时候打开，传输完自动关闭。
+注意：在配置串口的时候需要使能串口的dma发送，需要在配置dma之前，放在dma配置里面去使能会导致串口无法正常发送，原因不明
+/*********************************************************************************************************
+* 函数名称：ConfigUART
+* 函数功能：配置串口相关的参数，包括GPIO、RCU、USART和NVIC  
+* 输入参数：bound，波特率
+* 输出参数：void
+* 返 回 值：void
+* 创建日期：2021年07月01日
+* 注    意：
+*********************************************************************************************************/
+static  void  ConfigUART(unsigned int bound)
+{
+  rcu_periph_clock_enable(RCU_GPIOA);  //使能GPIOA时钟
+  rcu_periph_clock_enable(RCU_USART1); //使能串口时钟
+
+  //配置TX的GPIO 
+  gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+  
+  //配置RX的GPIO
+  gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+
+  //配置USART的参数
+  usart_deinit(USART1);                                 //RCU配置恢复默认值
+  usart_baudrate_set(USART1, bound);                    //设置波特率
+  usart_stop_bit_set(USART1, USART_STB_1BIT);           //设置停止位
+  usart_word_length_set(USART1, USART_WL_8BIT);         //设置数据字长度
+  usart_parity_config(USART1, USART_PM_NONE);           //设置奇偶校验位
+  usart_receive_config(USART1, USART_RECEIVE_ENABLE);   //使能接收
+  usart_transmit_config(USART1, USART_TRANSMIT_ENABLE); //使能发送
+
+  usart_interrupt_enable(USART1, USART_INT_RBNE);       //使能接收缓冲区非空中断
+  usart_interrupt_enable(USART1, USART_INT_TBE);        //使能发送缓冲区空中断
+  usart_enable(USART1);                                 //使能串口
+  
+  //这句很重要
+  usart_dma_transmit_config(USART0,USART_DENT_ENABLE);  //使能DMA发送
+  
+  //nvic_irq_enable(USART1_IRQn, 0, 0);                   //使能串口中断，设置优先级
+                                                                     
+  s_iUARTTxSts = UART_STATE_OFF;                        //串口发送数据状态设置为未发送数据
+}
+
+
+接着配置串口发送dma，在用户手册中找到UART0——TX对应的dma通道为DMA0-Channel3
+/*********************************************************************************************************
+* 函数名称：EnableDMASend
+* 函数功能：DMA单次发送
+* 输入参数：void
+* 输出参数：void
+* 返 回 值：void 
+* 创建日期：2021年07月01日
+* 注    意：
+//    uint32_t periph_addr;       /*!< peripheral base address */
+//    uint32_t periph_width;      /*!< transfer data size of peripheral */
+//    uint32_t memory_addr;       /*!< memory base address */
+//    uint32_t memory_width;      /*!< transfer data size of memory */
+//    uint32_t number;            /*!< channel transfer number */
+//    uint32_t priority;          /*!< channel priority level */
+//    uint8_t periph_inc;         /*!< peripheral increasing mode */
+//    uint8_t memory_inc;         /*!< memory increasing mode */
+//    uint8_t direction;          /*!< channel data transfer direction */
+//*********************************************************************************************************/
+static void EnableDMATX(void)
+{
+  dma_parameter_struct dma_para_init; //dma参数结构体
+  
+  rcu_periph_clock_enable(RCU_DMA0);
+  dma_deinit(DMA0, DMA_CH3);
+    
+  usart_flag_clear(USART1, USART_FLAG_TC); //清除发送完成中断标志位
+  
+  dma_struct_para_init(&dma_para_init); //将结构体全部设置为默认值
+  
+  dma_para_init.periph_addr = (uint32_t)(&USART_DATA(USART1));  //外设地址设置为USART_DATA
+  dma_para_init.periph_width = DMA_MEMORY_WIDTH_8BIT; //数据宽度
+  //dma_para_init.memory_addr = (uint32_t)&s_idmaBuf; //设置内存地址
+  dma_para_init.memory_width = DMA_PERIPHERAL_WIDTH_8BIT; //内存地址宽度
+  dma_para_init.number = 1; //一次传输一个
+  dma_para_init.priority = DMA_PRIORITY_HIGH; //优先级
+  dma_para_init.periph_inc = DMA_MEMORY_INCREASE_DISABLE;
+  dma_para_init.memory_inc = DMA_PERIPH_INCREASE_ENABLE;
+  dma_para_init.direction = DMA_MEMORY_TO_PERIPHERAL; //方向为内存到寄存器
+  
+  dma_init(DMA0, DMA_CH3, &dma_para_init); //TX对应DMA0的Channel
+  
+  /* configure DMA mode */
+  dma_circulation_disable(DMA0, DMA_CH3);
+  dma_memory_to_memory_disable(DMA0, DMA_CH3);
+  
+  
+  //配置DMA中断
+  nvic_irq_enable(DMA0_Channel3_IRQn, 0, 0);
+  dma_interrupt_enable(DMA0, DMA_CH3, DMA_INT_FTF);
+  
+//  dma_channel_enable(DMA0, DMA_CH3);
+}
+
+同时需要配置一下dma中断，在传输完成后失能dma通道
+/*********************************************************************************************************
+* 函数名称：DMA0_Channel3_IRQHandler
+* 函数功能：DMA传输完毕后失能DMA通道
+* 输入参数：void
+* 输出参数：void
+* 返 回 值：void 
+* 创建日期：2021年07月01日
+* 注    意：
+*********************************************************************************************************/
+void DMA0_Channel3_IRQHandler(void)
+{
+    if(dma_interrupt_flag_get(DMA0, DMA_CH3, DMA_INT_FLAG_FTF))
+    {     
+        dma_interrupt_flag_clear(DMA0, DMA_CH3, DMA_INT_FLAG_FTF);
+        /* disable DMA channel3 */
+        dma_channel_disable(DMA0, DMA_CH3);  
+    }
+}
+
+最后编写接口函数
+/*********************************************************************************************************
+* 函数名称：WriteUART0dma
+* 函数功能：通过dma发送
+* 输入参数：
+* 输出参数：void
+* 返 回 值：void
+* 创建日期：2021年07月01日
+* 注    意：
+*********************************************************************************************************/
+void WriteUART1dma(unsigned char* pbuf)
+{
+  unsigned int len = 0;
+  
+  len = strlen((const char*)pbuf);
+  
+  /* 设置DMA传输 */
+	dma_channel_disable(DMA0, DMA_CH3);		/* 关闭DMA传输才可以进行设置 */
+	dma_memory_address_config(DMA0,DMA_CH3,(uint32_t)pbuf);
+	dma_transfer_number_config(DMA0,DMA_CH3,len);
+	dma_channel_enable(DMA0, DMA_CH3);		/* 开启DMA传输 */
+  
+    while(usart_flag_get(USART1, USART_FLAG_TC) != SET) //等待发送完成
+  {
+    
+  }
+}
